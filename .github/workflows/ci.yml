@@ -1,0 +1,111 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  lint-and-test:
+    name: lint + test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - user-service
+          - ride-service
+          - driver-service
+          - pricing-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint and unit test ${{ matrix.service }}
+        working-directory: services/${{ matrix.service }}
+        run: |
+          if [ -f Makefile ]; then
+            make test
+          else
+            echo "No Makefile found for ${{ matrix.service }} yet — skipping (per-service 'make test' target is expected once the service scaffold lands)."
+          fi
+
+  build-images:
+    name: build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - user-service
+          - ride-service
+          - driver-service
+          - pricing-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: services/${{ matrix.service }}
+          push: false
+          tags: rideflow/${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+
+      - name: Trivy scan (${{ matrix.service }})
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: rideflow/${{ matrix.service }}:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          severity: "CRITICAL,HIGH"
+          ignore-unfixed: true
+
+  build-chaos-injector:
+    name: build (chaos-injector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: chaos-injector
+          push: false
+          tags: rideflow/chaos-injector:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+
+      - name: Trivy scan (chaos-injector)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: rideflow/chaos-injector:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          severity: "CRITICAL,HIGH"
+          ignore-unfixed: true
+
+  compose-config-check:
+    name: validate docker-compose.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        run: docker compose config -q

@@ -1,0 +1,170 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # OIDC to AWS — no static AWS keys
+  contents: read
+
+env:
+  AWS_REGION_PRIMARY: ap-south-1
+  AWS_REGION_SECONDARY: ap-southeast-1
+  EKS_CLUSTER_PRIMARY: rideflow-primary
+  EKS_CLUSTER_SECONDARY: rideflow-secondary
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-south-1.amazonaws.com
+  CHAOS_URL: http://chaos-injector.chaos.svc.cluster.local:9000
+
+jobs:
+  build:
+    name: build + push (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - api-gateway
+          - user-service
+          - ride-service
+          - driver-service
+          - pricing-service
+          - chaos-injector
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION_PRIMARY }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve build context
+        id: ctx
+        run: |
+          if [ "${{ matrix.service }}" = "chaos-injector" ]; then
+            echo "path=chaos-injector" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=services/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ steps.ctx.outputs.path }}
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+          exit-code: "1"
+          severity: "CRITICAL,HIGH"
+          ignore-unfixed: true
+
+  deploy-primary:
+    name: deploy to primary (ap-south-1)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION_PRIMARY }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_PRIMARY }} --region ${{ env.AWS_REGION_PRIMARY }}
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "3.15.0"
+
+      - name: Helm upgrade (primary)
+        run: |
+          helm upgrade --install rideflow deploy/helm/rideflow \
+            -n rideflow --create-namespace \
+            --set tag=${{ github.sha }} \
+            --set image.registry=${{ env.ECR_REGISTRY }} \
+            --wait --timeout 5m
+
+  resilience-gate:
+    name: resilience gate (chaos smoke test)
+    needs: deploy-primary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION_PRIMARY }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_PRIMARY }} --region ${{ env.AWS_REGION_PRIMARY }}
+
+      - name: Port-forward chaos-injector control API
+        run: |
+          kubectl -n chaos port-forward svc/chaos-injector 9000:9000 &
+          echo "PF_PID=$!" >> "$GITHUB_ENV"
+          sleep 5
+
+      - name: Run chaos smoke experiment and gate on result
+        run: |
+          set -euo pipefail
+          RUN_ID=$(curl -sf -XPOST http://localhost:9000/experiments/pod-kill-ride-service/run | jq -r .runId)
+          echo "Started run $RUN_ID"
+          sleep 180
+          RESULT=$(curl -sf http://localhost:9000/runs/$RUN_ID | jq -r .result)
+          MTTR=$(curl -sf http://localhost:9000/runs/$RUN_ID | jq -r .mttrSeconds)
+          echo "MTTR=${MTTR}s result=${RESULT}"
+          if [ "$RESULT" != "pass" ]; then
+            echo "::error::Resilience gate failed — deployment is not self-healing. result=${RESULT}"
+            curl -sf -XPOST http://localhost:9000/abort || true
+            exit 1
+          fi
+
+      - name: Stop port-forward
+        if: always()
+        run: kill "${PF_PID:-0}" 2>/dev/null || true
+
+  deploy-secondary:
+    name: deploy to secondary (ap-southeast-1)
+    needs: resilience-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION_SECONDARY }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_SECONDARY }} --region ${{ env.AWS_REGION_SECONDARY }}
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "3.15.0"
+
+      - name: Helm upgrade (secondary)
+        run: |
+          helm upgrade --install rideflow deploy/helm/rideflow \
+            -n rideflow --create-namespace \
+            -f deploy/helm/values-secondary.yaml \
+            --set tag=${{ github.sha }} \
+            --set image.registry=${{ env.ECR_REGISTRY }} \
+            --wait --timeout 5m
