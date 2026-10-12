@@ -119,7 +119,7 @@ def get_run(run_id: str):
 
 @app.post("/abort")
 async def abort():
-    result = await engine.abort_all()
+    result = await engine.abort_all(EXPERIMENTS)
     return {"aborted": True, "detail": result}
 
 

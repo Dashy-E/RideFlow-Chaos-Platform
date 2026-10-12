@@ -39,8 +39,14 @@ class FaultBackend:
     async def pod_kill(self, service: str, count: int) -> str:
         raise NotImplementedError
 
+    async def revert_pod_kill(self, service: str) -> str:
+        return "no explicit revert needed — ReplicaSet/kubelet already restored the pod"
+
     async def cpu_hog(self, service: str, duration_s: int) -> str:
         raise NotImplementedError
+
+    async def revert_cpu_hog(self, service: str) -> str:
+        return "busy-loop self-terminates via timeout"
 
     async def oom(self, service: str) -> str:
         raise NotImplementedError
@@ -102,8 +108,20 @@ class LocalBackend(FaultBackend):
             return f"docker restart {victim.name} (compose will not resurrect it as a new pod, but the process restarts, mirroring ReplicaSet recovery)"
         return await self._set_chaos(service, "error")
 
+    async def revert_pod_kill(self, service: str) -> str:
+        if self._docker:
+            return await super().revert_pod_kill(service)
+        # the no-docker fallback above left the service in "error" mode, which
+        # nothing restarts its way out of — clear it explicitly
+        return await self._set_chaos(service, "")
+
     async def cpu_hog(self, service: str, duration_s: int) -> str:
         return await self._set_chaos(service, "latency")  # closest local proxy: saturate via induced latency
+
+    async def revert_cpu_hog(self, service: str) -> str:
+        # unlike the real busy-loop, the latency proxy has no timeout of its
+        # own; without this the service stayed slow after every cpu_hog run
+        return await self._set_chaos(service, "")
 
     async def oom(self, service: str) -> str:
         return await self.pod_kill(service, 1)

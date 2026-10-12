@@ -60,6 +60,10 @@ class ChaosEngine:
         self._http = httpx.AsyncClient(timeout=10.0)
         self._runs: dict[str, RunResult] = self._load_runs()
         self._revert_fn = None  # set while a fault is active, used by /abort
+        # Set by /abort. The run coroutine checks it between every phase, so an
+        # operator abort actually ends the run instead of only reverting the
+        # fault while monitoring/recovery carries on and reports "pass".
+        self._abort_event = asyncio.Event()
 
     # ---- persistence (so a crash-restart can auto-revert, doc §8.5) ----
     def _load_runs(self) -> dict[str, RunResult]:
@@ -95,7 +99,9 @@ class ChaosEngine:
         return self._enabled
 
     def is_running(self) -> bool:
-        return self._active_run is not None and self._active_run.status == "running"
+        # an aborted run still occupies the slot until its coroutine has
+        # finished reverting, so a second experiment can't start under it
+        return self._active_run is not None
 
     async def steady_state_holds(self, conditions) -> tuple[bool, str | None]:
         for cond in conditions:
@@ -142,6 +148,7 @@ class ChaosEngine:
             run = RunResult(runId=run_id, experimentId=exp.id, status="running", dryRun=dry_run)
             self._active_run = run
             self._runs[run_id] = run
+            self._abort_event.clear()
             self._save_runs()
 
         log = run.log
@@ -168,6 +175,11 @@ class ChaosEngine:
                 run.status, run.result = "pass", "pass"
                 return run
 
+            if self._abort_event.is_set():
+                log.append("ABORTED by operator before injection, no fault injected")
+                run.status, run.result = "aborted", "fail"
+                return run
+
             # Record intent BEFORE injecting, not after: if the process dies
             # mid-injection-call, startup's orphaned-fault check still finds
             # a record to revert against. A revert call when nothing was
@@ -189,12 +201,20 @@ class ChaosEngine:
             duration_s = parse_duration(exp.duration)
             aborted = await self._monitor(exp, run, duration_s)
 
-            # Revert
+            # Revert (on an operator abort, abort_all already reverted; doing
+            # it again is a no-op for every fault type and covers the case
+            # where that first revert call failed)
             revert_desc = await self._revert(exp, service)
             log.append(f"REVERT: {revert_desc}")
             self.clear_active_fault()
             self.metrics.active_faults.labels(exp.fault.type, service or exp.fault.selector.zone or "region").dec()
             await self.post_annotation(f"chaos:{exp.id} REVERT", ["chaos", exp.fault.type])
+
+            if self._abort_event.is_set():
+                # emergency stop: end the run now rather than spending up to
+                # another 5 minutes measuring recovery of an aborted run
+                run.status, run.result = "aborted", "fail"
+                return run
 
             # MeasureRecovery
             recovered_at = await self._measure_recovery(exp, t0)
@@ -210,10 +230,12 @@ class ChaosEngine:
             await self.post_annotation(f"chaos:{exp.id} RECOVERED mttr={run.mttrSeconds}", ["chaos", "recovery"])
             return run
         except Exception as e:
-            log.append(f"ERROR: {e}")
+            log.append(f"ERROR: {e!r}")  # repr: some httpx errors stringify to ""
             run.status, run.result = "fail", "fail"
             try:
-                if service:
+                # not just `if service:` because az_blackhole/region_failure
+                # have no target service but still need reverting
+                if self.find_orphaned_fault():
                     await self._revert(exp, service)
                 self.clear_active_fault()
             except Exception:
@@ -249,9 +271,9 @@ class ChaosEngine:
     async def _revert(self, exp: ExperimentDefinition, service: str | None) -> str:
         f = exp.fault
         if f.type in ("pod_kill", "oom"):
-            return "no explicit revert needed — ReplicaSet/kubelet already restored the pod"
+            return await self.backend.revert_pod_kill(service)
         if f.type == "cpu_hog":
-            return "busy-loop self-terminates via timeout"
+            return await self.backend.revert_cpu_hog(service)
         if f.type == "dependency_failure":
             return await self.backend.revert_dependency_failure(service)
         if f.type in ("network_latency", "packet_loss"):
@@ -289,7 +311,12 @@ class ChaosEngine:
                         return True
                 else:
                     breach_since = None
-            await asyncio.sleep(2)
+            # sleep 2s between polls, but wake immediately on /abort
+            try:
+                await asyncio.wait_for(self._abort_event.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                continue
+            return True
         return False
 
     async def _measure_recovery(self, exp: ExperimentDefinition, t0: float, timeout: float = 300, stable_for: float = 30) -> float | None:
@@ -337,17 +364,32 @@ class ChaosEngine:
             self._save_runs()
         return f"auto-reverted orphaned fault from run {orphan['runId']}: {desc}"
 
-    async def abort_all(self) -> str:
-        orphan = self.find_orphaned_fault()
-        if self._revert_fn:
-            desc = await self._revert_fn()
-            self.clear_active_fault()
-            if self._active_run:
-                self._active_run.status = "aborted"
-            return f"reverted active fault: {desc}"
-        if orphan:
-            self.clear_active_fault()
-            return f"cleared orphaned fault record for run {orphan['runId']} (state file only — revert manually if the process crashed mid-fault, see docs/runbooks/chaos-abort.md)"
+    async def abort_all(self, experiments: dict | None = None) -> str:
+        run = self._active_run
+        if run:
+            # signal the run coroutine so it stops at its next check (the
+            # monitor loop wakes immediately) instead of carrying on to "pass"
+            self._abort_event.set()
+            run.log.append("ABORTED by operator")
+            self.metrics.abort_total.labels(run.experimentId, "operator").inc()
+            if self._revert_fn:
+                # revert right now rather than waiting for the run loop to
+                # wake, since this is the emergency path
+                try:
+                    desc = await self._revert_fn()
+                except Exception as e:
+                    # the run loop is already signalled and retries the revert
+                    # itself, so report this rather than failing the request
+                    run.log.append(f"emergency REVERT failed: {e!r}")
+                    return f"stopped run {run.runId} but its immediate revert failed ({e!r}); the run is retrying the revert"
+                run.log.append(f"emergency REVERT: {desc}")
+                return f"stopped run {run.runId} and reverted its fault: {desc}"
+            return f"stopped run {run.runId} before any fault was injected"
+        if self.find_orphaned_fault():
+            # no live run but a fault record exists: reconstruct and revert it
+            # the way startup crash-recovery does, instead of only deleting
+            # the record and leaving the fault in place
+            return await self.recover_orphaned_fault(experiments or {})
         return "no active fault to revert"
 
     def get_run(self, run_id: str) -> RunResult | None:

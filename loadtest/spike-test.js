@@ -38,6 +38,7 @@ export default function () {
     res = http.post(
       `${BASE}/v1/rides`,
       JSON.stringify({
+        userId: `k6-vu-${__VU}`,
         pickup: { lat: 19.076, lng: 72.877 },
         drop: { lat: 19.119, lng: 72.846 },
       }),

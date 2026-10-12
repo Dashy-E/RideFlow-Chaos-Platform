@@ -1,6 +1,7 @@
 """pricing-service — fare computation with a deliberately CPU-bound surge
 Monte Carlo simulation, so HPA scale-out is easy to trigger for CO3 demos.
 """
+import asyncio
 import os
 import random
 import time
@@ -75,7 +76,9 @@ async def metrics_and_chaos(request: Request, call_next):
         return response
     fault = request.headers.get("x-chaos-fault") or _runtime_fault["mode"]
     if fault == "latency":
-        time.sleep(float(os.getenv("CHAOS_LATENCY_MS", "300")) / 1000)
+        # must not block: time.sleep here stalled the whole event loop, so under
+        # load even /admin/chaos (the revert) queued behind the injected delay
+        await asyncio.sleep(float(os.getenv("CHAOS_LATENCY_MS", "300")) / 1000)
     elif fault == "error":
         INFLIGHT.labels(SERVICE).dec()
         REQS.labels(SERVICE, request.method, request.url.path, "500").inc()

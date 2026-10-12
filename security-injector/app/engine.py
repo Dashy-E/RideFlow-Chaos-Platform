@@ -82,8 +82,16 @@ class AttackEngine:
         try:
             await task
         except asyncio.CancelledError:
-            run.status = "aborted"
-            run.log.append("ABORTED by operator")
+            # _execute normally records the abort itself; this covers a cancel
+            # that landed before the task ever started (its finally never ran,
+            # which would otherwise leave the engine stuck "running" forever)
+            if run.status == "running":
+                run.status = "aborted"
+                run.log.append("ABORTED by operator")
+                run.finishedAt = time.time()
+                self._active_run = None
+                self._active_task = None
+                self._save_runs()
         return run
 
     async def _execute(self, definition: AttackDefinition, run: AttackRun):
@@ -105,6 +113,12 @@ class AttackEngine:
                 m.vulnerabilities_open.labels(definition.id, f.check).set(0 if f.passed else 1)
             m.runs_total.labels(definition.id, run.verdict).inc()
             run.log.append(f"completed: verdict={run.verdict}, {len(failed)}/{len(findings)} findings failed")
+        except asyncio.CancelledError:
+            # set before the finally below persists the run, otherwise it was
+            # saved to disk as "running" and only flipped to "aborted" in memory
+            run.status = "aborted"
+            run.log.append("ABORTED by operator")
+            raise
         except Exception as e:
             run.status = "error"
             run.log.append(f"ERROR: {e}")

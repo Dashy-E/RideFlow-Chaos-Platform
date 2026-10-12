@@ -408,8 +408,11 @@ document.getElementById("chaos-run-btn").onclick = async () => {
   finally { btn.disabled = false; }
 };
 document.getElementById("chaos-abort-btn").onclick = async () => {
-  await j(CHAOS_API, "/abort", { method: "POST" });
-  alert("Abort signal sent.");
+  try {
+    const r = await j(CHAOS_API, "/abort", { method: "POST" });
+    alert("Abort: " + r.detail);
+  } catch (e) { alert("Abort FAILED: " + e.message); }
+  refreshChaos();
 };
 
 async function refreshChaos() {
@@ -462,8 +465,11 @@ document.getElementById("sec-run-btn").onclick = async () => {
   finally { btn.disabled = false; }
 };
 document.getElementById("sec-abort-btn").onclick = async () => {
-  await j(SEC_API, "/abort", { method: "POST" });
-  alert("Abort signal sent.");
+  try {
+    const r = await j(SEC_API, "/abort", { method: "POST" });
+    alert("Abort: " + r.detail);
+  } catch (e) { alert("Abort FAILED: " + e.message); }
+  refreshSecurity();
 };
 
 async function refreshSecurity() {
