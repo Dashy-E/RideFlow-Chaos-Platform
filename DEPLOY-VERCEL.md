@@ -50,8 +50,8 @@ If the backend IP changes (e.g. after `terraform destroy` + `apply`), update
 
 ## How it behaves
 
-- Opening the Vercel URL prompts for the password (any username) when
-  `DASHBOARD_PASSWORD` is set.
+- When `DASHBOARD_PASSWORD` is set, the dashboard asks for it once per
+  browser tab and sends it with every `/api` call.
 - **Run experiment** returns after at most 20s with "started"; the run keeps
   going on the backend and the dashboard's 2s polling shows its progress.
   Chaos experiments last minutes, far past a serverless function's timeout.

@@ -305,10 +305,35 @@ const HOST = location.hostname || "localhost";
 const CHAOS_API = DIRECT ? `http://${HOST}:9000` : "/api/chaos";
 const SEC_API = DIRECT ? `http://${HOST}:9001` : "/api/security";
 
+// The /api proxy may require DASHBOARD_PASSWORD. Ask once, keep it for this
+// tab, and send it on every call ourselves: the browser's native Basic-auth
+// dialog re-prompts per path and per concurrent request, which loops with
+// the 2s polling.
+let authHeader = null;
+let authDeclined = false;
+try { authHeader = sessionStorage.getItem("rideflow-auth"); } catch (e) {}
+
+async function apiFetch(url, opts = {}) {
+  if (DIRECT) return fetch(url, opts);
+  for (;;) {
+    const sent = authHeader;
+    const headers = Object.assign({}, opts.headers, sent ? { Authorization: sent } : {});
+    const r = await fetch(url, Object.assign({}, opts, { headers }));
+    if (r.status !== 401) return r;
+    // Another request already got a new password while this one was in flight.
+    if (authHeader !== sent) continue;
+    if (authDeclined) return r;
+    const pw = prompt(sent ? "Wrong password. RideFlow dashboard password:" : "RideFlow dashboard password:");
+    if (pw === null) { authDeclined = true; return r; }
+    authHeader = "Basic " + btoa(unescape(encodeURIComponent("dashboard:" + pw)));
+    try { sessionStorage.setItem("rideflow-auth", authHeader); } catch (e) {}
+  }
+}
+
 (async function setToolLinks() {
   let urls = { grafanaUrl: `http://${HOST}:3001`, prometheusUrl: `http://${HOST}:9090` };
   if (!DIRECT) {
-    try { urls = await (await fetch("/api/config")).json(); } catch (e) { urls = {}; }
+    try { urls = await (await apiFetch("/api/config")).json(); } catch (e) { urls = {}; }
   }
   for (const [id, url] of [["grafana-link", urls.grafanaUrl], ["prometheus-link", urls.prometheusUrl]]) {
     const a = document.getElementById(id);
@@ -317,7 +342,7 @@ const SEC_API = DIRECT ? `http://${HOST}:9001` : "/api/security";
 })();
 
 async function j(base, path, opts) {
-  const r = await fetch(base + path, opts);
+  const r = await apiFetch(base + path, opts);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }

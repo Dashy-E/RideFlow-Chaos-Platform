@@ -59,7 +59,9 @@ function authorized(req) {
 
 module.exports = async function handler(req, res) {
   if (!authorized(req)) {
-    res.setHeader("WWW-Authenticate", 'Basic realm="RideFlow Mission Control"');
+    // No WWW-Authenticate header on purpose: it makes browsers pop their
+    // native login dialog for every polled request. The dashboard asks for
+    // the password itself and sends it as Basic auth (see apiFetch).
     return send(res, 401, { detail: "authentication required" });
   }
 
