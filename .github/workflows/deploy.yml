@@ -20,6 +20,12 @@ env:
 jobs:
   build:
     name: build + push (${{ matrix.service }})
+    # The EKS pipeline needs the AWS OIDC role + ECR from infra/global. Until
+    # that exists, every push failed at "Configure AWS credentials". Opt in by
+    # setting the repo variable AWS_DEPLOY_ENABLED=true (Settings > Secrets and
+    # variables > Actions > Variables); every later job needs this one, so
+    # they all skip cleanly when it's off.
+    if: vars.AWS_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:

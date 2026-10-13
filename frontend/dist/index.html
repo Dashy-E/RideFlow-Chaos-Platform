@@ -110,8 +110,8 @@
   <button class="tab" data-view="logs">📜&nbsp;&nbsp;Live Logs</button>
   <div class="spacer"></div>
   <div class="sidefoot">
-    <a href="http://localhost:3001" target="_blank">Grafana ↗</a><br/>
-    <a href="http://localhost:9090" target="_blank">Prometheus ↗</a><br/>
+    <a id="grafana-link" href="http://localhost:3001" target="_blank">Grafana ↗</a><br/>
+    <a id="prometheus-link" href="http://localhost:9090" target="_blank">Prometheus ↗</a><br/>
     <span style="opacity:.6">polls every 2s</span>
   </div>
 </nav>
@@ -296,8 +296,25 @@
 </main>
 
 <script>
-const CHAOS_API = "http://localhost:9000";
-const SEC_API = "http://localhost:9001";
+// Served by the compose stack's nginx (port 5173, on localhost or the EC2 box)
+// or opened as a file: talk to the injectors directly on the same host.
+// Anywhere else (e.g. Vercel): go through the same-origin /api proxy in
+// api/proxy.js, which avoids mixed-content blocking and CORS.
+const DIRECT = location.protocol === "file:" || location.port === "5173";
+const HOST = location.hostname || "localhost";
+const CHAOS_API = DIRECT ? `http://${HOST}:9000` : "/api/chaos";
+const SEC_API = DIRECT ? `http://${HOST}:9001` : "/api/security";
+
+(async function setToolLinks() {
+  let urls = { grafanaUrl: `http://${HOST}:3001`, prometheusUrl: `http://${HOST}:9090` };
+  if (!DIRECT) {
+    try { urls = await (await fetch("/api/config")).json(); } catch (e) { urls = {}; }
+  }
+  for (const [id, url] of [["grafana-link", urls.grafanaUrl], ["prometheus-link", urls.prometheusUrl]]) {
+    const a = document.getElementById(id);
+    if (url) a.href = url; else a.style.display = "none";
+  }
+})();
 
 async function j(base, path, opts) {
   const r = await fetch(base + path, opts);

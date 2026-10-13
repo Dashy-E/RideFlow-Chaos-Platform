@@ -9,7 +9,7 @@
     "test": "node --test src/*.test.js || true"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "express": "^4.21.2",
     "prom-client": "^15.1.3",
     "jsonwebtoken": "^9.0.2",
     "bcryptjs": "^2.4.3",

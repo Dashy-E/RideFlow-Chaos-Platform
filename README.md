@@ -96,6 +96,11 @@ docs/runbooks/      # deploy, rollback, failover, chaos-abort, teardown
 .github/workflows/  # CI (lint/build/scan) + CD (build→deploy-primary→resilience-gate→deploy-secondary)
 ```
 
+## Hosting the dashboard on Vercel
+
+The dashboard can be deployed straight from GitHub to Vercel, with the backend
+running elsewhere (e.g. the free-tier EC2 box). See [DEPLOY-VERCEL.md](DEPLOY-VERCEL.md).
+
 ## Running on real AWS
 
 The Terraform in `infra/` is written to be applied, but **nothing here provisions

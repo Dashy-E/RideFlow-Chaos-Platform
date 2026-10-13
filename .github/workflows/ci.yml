@@ -65,18 +65,21 @@ jobs:
           cache-to: type=gha,mode=max
           load: true
 
+      # Trivy CLI from a pinned image rather than aquasecurity/trivy-action@master:
+      # a floating branch ref means unreviewed code runs in CI on every push.
       - name: Trivy scan (${{ matrix.service }})
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: rideflow/${{ matrix.service }}:${{ github.sha }}
-          format: table
-          exit-code: "1"
-          severity: "CRITICAL,HIGH"
-          ignore-unfixed: true
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock             aquasec/trivy:0.58.1 image --scanners vuln             --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1             rideflow/${{ matrix.service }}:${{ github.sha }}
 
-  build-chaos-injector:
-    name: build (chaos-injector)
+  build-injectors:
+    name: build (${{ matrix.service }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - chaos-injector
+          - security-injector
     steps:
       - uses: actions/checkout@v4
 
@@ -86,21 +89,18 @@ jobs:
       - name: Build image (no push)
         uses: docker/build-push-action@v5
         with:
-          context: chaos-injector
+          context: ${{ matrix.service }}
           push: false
-          tags: rideflow/chaos-injector:${{ github.sha }}
+          tags: rideflow/${{ matrix.service }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           load: true
 
-      - name: Trivy scan (chaos-injector)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: rideflow/chaos-injector:${{ github.sha }}
-          format: table
-          exit-code: "1"
-          severity: "CRITICAL,HIGH"
-          ignore-unfixed: true
+      # Trivy CLI from a pinned image rather than aquasecurity/trivy-action@master:
+      # a floating branch ref means unreviewed code runs in CI on every push.
+      - name: Trivy scan (${{ matrix.service }})
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock             aquasec/trivy:0.58.1 image --scanners vuln             --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1             rideflow/${{ matrix.service }}:${{ github.sha }}
 
   compose-config-check:
     name: validate docker-compose.yml
