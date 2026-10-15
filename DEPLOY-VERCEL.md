@@ -37,21 +37,36 @@ Note the `public_ip` output.
 
    | Name | Value |
    |---|---|
-   | `RIDEFLOW_BACKEND_URL` | `http://<public_ip>` (no port) |
-   | `DASHBOARD_PASSWORD` | a password. Strongly recommended: without it anyone with the URL can run chaos experiments |
+   | `DASHBOARD_PASSWORD` | **Required.** A password. The dashboard asks for it once per tab; without it anyone with the URL could run chaos experiments, so the Backend box (below) refuses to work until it is set |
+   | `RIDEFLOW_BACKEND_URL` | Optional default backend, `http://<public_ip>` (no port). Only used when the Backend box is empty |
 
    Optional: `RIDEFLOW_CHAOS_URL` / `RIDEFLOW_SECURITY_URL` to override the
    default `<backend>:9000` / `<backend>:9001`.
 4. **Deploy.** Every push to `main` redeploys automatically; other branches
    get preview URLs.
 
-If the backend IP changes (e.g. after `terraform destroy` + `apply`), update
-`RIDEFLOW_BACKEND_URL` and redeploy (Deployments → ⋯ → Redeploy).
+## 3. Connect the dashboard to the backend
+
+Open the Vercel URL, enter the password, then type the EC2 instance's
+**Public IPv4 address** into the **Backend** box at the top and press
+**Connect**. The dot turns green when both injectors answer.
+
+An EC2 public IP changes on every stop/start. Nothing needs redeploying:
+start the instance, wait about two minutes (every container has
+`restart: unless-stopped`, so the whole stack comes back by itself), paste the
+new IP into the Backend box and press Connect. The address is remembered in
+that browser.
 
 ## How it behaves
 
 - When `DASHBOARD_PASSWORD` is set, the dashboard asks for it once per
   browser tab and sends it with every `/api` call.
+- The Backend box's address goes to the proxy in the `X-RideFlow-Backend`
+  header. The proxy only accepts public hosts (no loopback, private,
+  link-local/metadata or `.internal` addresses) and only when
+  `DASHBOARD_PASSWORD` is set, so it can't be used as an open relay.
+- While the backend is unreachable the dashboard shows why in a banner,
+  stops polling, and retries every 10 seconds.
 - **Run experiment** returns after at most 20s with "started"; the run keeps
   going on the backend and the dashboard's 2s polling shows its progress.
   Chaos experiments last minutes, far past a serverless function's timeout.

@@ -95,6 +95,21 @@
   .score-ring svg { transform: rotate(-90deg); }
   .score-num { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 26px; font-weight: 800; }
 
+  /* ---------- backend connection (Vercel mode) ---------- */
+  .topbar { flex-wrap: wrap; gap: 10px; }
+  .conn { display: flex; align-items: center; gap: 8px; }
+  .conn label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+  .conn input { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: var(--mono); width: 210px; }
+  .conn input:focus { outline: none; border-color: var(--blue); }
+  .conn-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim-2); flex-shrink: 0; }
+  .conn-dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .conn-dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .conn-dot.wait { background: var(--amber); }
+  .banner { margin: 16px 28px 0; padding: 12px 16px; border-radius: 10px; font-size: 13px; line-height: 1.5; background: rgba(248,113,113,.1); border: 1px solid rgba(248,113,113,.35); color: #ffc9c9; }
+  .banner.info { background: rgba(96,165,250,.1); border-color: rgba(96,165,250,.35); color: #cfe3ff; }
+  .banner b { color: var(--text); }
+  @media (max-width: 700px) { .conn input { width: 150px; } .banner { margin: 12px 16px 0; } }
+
   .footer-note { color: var(--dim-2); font-size: 11px; text-align: center; padding: 24px 0 8px; }
   a { color: var(--blue); text-decoration: none; }
   a:hover { text-decoration: underline; }
@@ -120,10 +135,17 @@
   <div class="topbar">
     <h1 id="topbar-title">Overview</h1>
     <div class="row">
+      <form id="conn-form" class="conn" hidden>
+        <span id="conn-dot" class="conn-dot" title="backend connection"></span>
+        <label for="conn-input">Backend</label>
+        <input id="conn-input" type="text" placeholder="EC2 public IP, e.g. 13.233.10.20" spellcheck="false" autocomplete="off" />
+        <button type="submit" class="primary">Connect</button>
+      </form>
       <span id="chaos-pill" class="pill off">chaos: …</span>
       <span id="security-pill" class="pill off">security: …</span>
     </div>
   </div>
+  <div id="conn-banner" class="banner" hidden></div>
 
   <!-- ================= OVERVIEW ================= -->
   <section class="view active" id="view-overview">
@@ -313,12 +335,26 @@ let authHeader = null;
 let authDeclined = false;
 try { authHeader = sessionStorage.getItem("rideflow-auth"); } catch (e) {}
 
+// Which backend the proxy talks to. An EC2 public IP changes on every
+// stop/start, so the operator types it into the Backend box; it's remembered
+// in this browser and sent on every call (api/proxy.js validates it).
+// Empty = the proxy's RIDEFLOW_BACKEND_URL default, if one is set.
+let backendAddr = "";
+try { backendAddr = localStorage.getItem("rideflow-backend") || ""; } catch (e) {}
+
+// Proxy error codes that mean "can't use the backend", as opposed to an
+// injector rejecting a particular request.
+const CONN_ERRORS = ["backend_unreachable", "backend_not_set", "invalid_backend", "password_not_set"];
+
 async function apiFetch(url, opts = {}) {
   if (DIRECT) return fetch(url, opts);
   for (;;) {
     const sent = authHeader;
-    const headers = Object.assign({}, opts.headers, sent ? { Authorization: sent } : {});
+    const headers = Object.assign({}, opts.headers,
+      sent ? { Authorization: sent } : {},
+      backendAddr ? { "X-RideFlow-Backend": backendAddr } : {});
     const r = await fetch(url, Object.assign({}, opts, { headers }));
+    if (r.status >= 400 && r.status !== 401) noteConnError(r);
     if (r.status !== 401) return r;
     // Another request already got a new password while this one was in flight.
     if (authHeader !== sent) continue;
@@ -330,16 +366,102 @@ async function apiFetch(url, opts = {}) {
   }
 }
 
-(async function setToolLinks() {
+async function setToolLinks() {
   let urls = { grafanaUrl: `http://${HOST}:3001`, prometheusUrl: `http://${HOST}:9090` };
   if (!DIRECT) {
     try { urls = await (await apiFetch("/api/config")).json(); } catch (e) { urls = {}; }
   }
   for (const [id, url] of [["grafana-link", urls.grafanaUrl], ["prometheus-link", urls.prometheusUrl]]) {
     const a = document.getElementById(id);
-    if (url) a.href = url; else a.style.display = "none";
+    if (url) { a.href = url; a.style.display = ""; } else a.style.display = "none";
   }
-})();
+  return urls;
+}
+
+// ---------- backend connection (Vercel mode only) ----------
+// ok: null = not checked yet. Polling pauses while not connected, so a dead
+// backend isn't hit with several 8s-timeout requests every 2 seconds.
+const conn = { ok: null, checking: false };
+
+function showConn(state, message, info) {
+  document.getElementById("conn-dot").className = "conn-dot " + state;
+  const banner = document.getElementById("conn-banner");
+  banner.hidden = !message;
+  banner.className = "banner" + (info ? " info" : "");
+  banner.innerHTML = message || "";
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function setConn(ok, detail) {
+  const was = conn.ok;
+  conn.ok = ok;
+  if (ok) {
+    showConn("ok", "");
+    if (was !== true) {
+      // (re)connected: lists and tool links may never have loaded
+      loadChaosExperiments().catch(() => {});
+      loadSecAttacks().catch(() => {});
+      setToolLinks();
+      refreshAll();
+    }
+  } else {
+    showConn("bad", `<b>Not connected to the backend.</b> ${esc(detail || "")}`);
+  }
+}
+
+function noteConnError(r) {
+  r.clone().json().then(body => {
+    if (body && CONN_ERRORS.includes(body.code)) setConn(false, body.detail);
+  }).catch(() => {});
+}
+
+async function checkConnection() {
+  if (DIRECT || conn.checking) return;
+  conn.checking = true;
+  if (conn.ok !== true) showConn("wait", backendAddr ? `Connecting to <b>${esc(backendAddr)}</b>…` : "Connecting…", true);
+  try {
+    const rs = await Promise.all([apiFetch(CHAOS_API + "/healthz"), apiFetch(SEC_API + "/healthz")]);
+    const bad = rs.find(r => !r.ok);
+    if (!bad) return setConn(true);
+    let detail = `HTTP ${bad.status}`;
+    try { detail = (await bad.json()).detail || detail; } catch (e) {}
+    if (bad.status === 401) detail = "The dashboard password is needed. Reload the page and enter it.";
+    setConn(false, detail);
+  } catch (e) {
+    setConn(false, "Could not reach this site's /api proxy: " + e.message);
+  } finally {
+    conn.checking = false;
+  }
+}
+
+async function initConnection() {
+  const form = document.getElementById("conn-form");
+  const input = document.getElementById("conn-input");
+  form.hidden = false;
+  input.value = backendAddr;
+  form.onsubmit = (ev) => {
+    ev.preventDefault();
+    backendAddr = input.value.trim();
+    try {
+      if (backendAddr) localStorage.setItem("rideflow-backend", backendAddr);
+      else localStorage.removeItem("rideflow-backend");
+    } catch (e) {}
+    conn.ok = null;
+    checkConnection();
+  };
+  const cfg = await setToolLinks();
+  if (!backendAddr && cfg.defaultBackend) input.value = cfg.defaultBackend.replace(/^http:\/\//, "");
+  if (!backendAddr && !cfg.defaultBackend && cfg.dashboardBackendAllowed !== undefined) {
+    conn.ok = false;
+    showConn("bad", "<b>No backend set.</b> Start your EC2 instance, copy its <b>Public IPv4 address</b> into the Backend box above, and press Connect.", true);
+    input.focus();
+    return;
+  }
+  checkConnection();
+}
 
 async function j(base, path, opts) {
   const r = await apiFetch(base + path, opts);
@@ -444,6 +566,7 @@ document.getElementById("chaos-run-btn").onclick = async () => {
   const id = document.getElementById("chaos-select").value;
   const dry = document.getElementById("chaos-dry-run").checked;
   const btn = document.getElementById("chaos-run-btn");
+  if (!id) return alert("No experiments loaded yet. Connect to the backend first.");
   btn.disabled = true;
   try { await j(CHAOS_API, `/experiments/${id}/run?dryRun=${dry}`, { method: "POST" }); }
   catch (e) { alert("Run failed: " + e.message); }
@@ -464,17 +587,20 @@ async function refreshChaos() {
       ? `<b>${s.activeRun.experimentId}</b><br/><span class="badge running">running</span>`
       : "No experiment running.";
     const runs = s.recentRuns || [];
+    // a finished real run that never breached steady state: nothing to detect or recover from
+    const noImpact = r => r.status === "pass" && r.t0 != null && r.mttdSeconds == null;
+    const secs = (r, x, unit) => x != null ? x.toFixed(1) + unit : noImpact(r) ? "no impact" : "—";
     if (runs.length) {
-      document.getElementById("chaos-mttd").textContent = runs[0].mttdSeconds != null ? runs[0].mttdSeconds.toFixed(1) : "—";
-      document.getElementById("chaos-mttr").textContent = runs[0].mttrSeconds != null ? runs[0].mttrSeconds.toFixed(1) : "—";
+      document.getElementById("chaos-mttd").textContent = secs(runs[0], runs[0].mttdSeconds, "");
+      document.getElementById("chaos-mttr").textContent = secs(runs[0], runs[0].mttrSeconds, "");
       document.getElementById("chaos-log").innerHTML = (runs[0].log || []).map(l => `<div>${l}</div>`).join("");
     }
     document.getElementById("chaos-runs-body").innerHTML = runs.map(r => `
       <tr>
         <td>${r.experimentId}</td>
         <td><span class="badge ${r.result}">${r.result}</span></td>
-        <td>${r.mttdSeconds != null ? r.mttdSeconds.toFixed(1) + "s" : "—"}</td>
-        <td>${r.mttrSeconds != null ? r.mttrSeconds.toFixed(1) + "s" : "—"}</td>
+        <td>${secs(r, r.mttdSeconds, "s")}</td>
+        <td>${secs(r, r.mttrSeconds, "s")}</td>
         <td>${timeAgo(r.t0)}</td>
       </tr>`).join("");
     document.getElementById("logs-chaos").innerHTML = runs.slice(0, 5).flatMap(r =>
@@ -501,6 +627,7 @@ document.getElementById("sec-select").addEventListener("change", updateSecDesc);
 document.getElementById("sec-run-btn").onclick = async () => {
   const id = document.getElementById("sec-select").value;
   const btn = document.getElementById("sec-run-btn");
+  if (!id) return alert("No attacks loaded yet. Connect to the backend first.");
   btn.disabled = true;
   try { await j(SEC_API, `/attacks/${id}/run`, { method: "POST" }); }
   catch (e) { alert("Run failed: " + e.message); }
@@ -550,10 +677,23 @@ async function refreshSecurity() {
 }
 
 // ---------- boot ----------
-loadChaosExperiments().catch(() => {});
-loadSecAttacks().catch(() => {});
-function refreshAll() { refreshOverview(); refreshChaos(); refreshSecurity(); }
-refreshAll();
+let refreshing = false;
+function refreshAll() {
+  if (!DIRECT && conn.ok !== true) return;
+  if (refreshing) return;  // previous poll still waiting on a slow backend
+  refreshing = true;
+  Promise.allSettled([refreshOverview(), refreshChaos(), refreshSecurity()]).finally(() => { refreshing = false; });
+}
+if (DIRECT) {
+  setToolLinks();
+  loadChaosExperiments().catch(() => {});
+  loadSecAttacks().catch(() => {});
+  refreshAll();
+} else {
+  initConnection();
+  // while disconnected, retry quietly (e.g. the EC2 box is still booting)
+  setInterval(() => { if (conn.ok === false) checkConnection(); }, 10000);
+}
 setInterval(refreshAll, 2000);
 </script>
 </body>

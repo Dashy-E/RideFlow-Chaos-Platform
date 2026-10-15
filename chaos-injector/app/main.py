@@ -1,3 +1,4 @@
+import asyncio
 import glob
 import logging
 import os
@@ -93,15 +94,28 @@ async def run_experiment(experiment_id: str, dryRun: bool = False):
     exp = EXPERIMENTS.get(experiment_id)
     if not exp:
         raise HTTPException(404, f"unknown experiment {experiment_id}")
+    # Shielded: a run lasts minutes, and callers like the Vercel proxy hang up
+    # after ~20s. Their disconnect must not cancel the experiment midway.
+    task = asyncio.ensure_future(_run_and_record(exp, dryRun))
+    _running_tasks.add(task)
+    task.add_done_callback(_running_tasks.discard)
     try:
-        run = await engine.run_experiment(exp, dry_run=dryRun)
+        run = await asyncio.shield(task)
     except SafetyError as e:
         raise HTTPException(409, str(e))
+    return run.model_dump()
+
+
+_running_tasks: set = set()
+
+
+async def _run_and_record(exp, dry_run: bool):
+    run = await engine.run_experiment(exp, dry_run=dry_run)
     if run.mttdSeconds is not None:
         metrics.mttd.labels(exp.id).set(run.mttdSeconds)
     if run.mttrSeconds is not None:
         metrics.mttr.labels(exp.id).set(run.mttrSeconds)
-    return run.model_dump()
+    return run
 
 
 @app.get("/runs")
