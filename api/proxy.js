@@ -6,8 +6,9 @@
 // elsewhere (e.g. an EC2 box running docker compose) and this function
 // forwards the dashboard's control-API calls to it server-side. vercel.json
 // rewrites
-//   /api/chaos/<path>    -> /api/proxy?target=chaos&path=<path>
-//   /api/security/<path> -> /api/proxy?target=security&path=<path>
+//   /api/chaos/<path>    -> /api/proxy?target=chaos&path=<path>     (chaos-injector :9000)
+//   /api/security/<path> -> /api/proxy?target=security&path=<path>  (security-injector :9001)
+//   /api/app/v1/<path>   -> /api/proxy?target=app&path=v1/<path>    (api-gateway :8080, the ride app)
 //   /api/config          -> /api/proxy?target=config
 //
 // Which backend: the dashboard sends the address the operator typed into its
@@ -32,7 +33,8 @@ const crypto = require("crypto");
 const RUN_WAIT_MS = 20000;
 const REQUEST_TIMEOUT_MS = 8000;
 const BACKEND_HEADER = "x-rideflow-backend";
-const PORTS = { chaos: 9000, security: 9001, grafana: 3001, prometheus: 9090 };
+const PORTS = { chaos: 9000, security: 9001, app: 8080, grafana: 3001, prometheus: 9090 };
+const TARGETS = ["chaos", "security", "app"];
 
 function send(res, status, body) {
   res.statusCode = status;
@@ -135,6 +137,7 @@ module.exports = async function handler(req, res) {
 
   if (target === "config") {
     return send(res, 200, {
+      mode: "proxy",
       backend: backend.base,
       backendSource: backend.source,
       defaultBackend: process.env.RIDEFLOW_BACKEND_URL ? normalizeBackend(process.env.RIDEFLOW_BACKEND_URL) : null,
@@ -144,7 +147,7 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  if (target !== "chaos" && target !== "security") {
+  if (!TARGETS.includes(target)) {
     return send(res, 404, { detail: `unknown target ${target}`, code: "unknown_target" });
   }
   const upstream = upstreamFor(target, backend);
@@ -159,6 +162,10 @@ module.exports = async function handler(req, res) {
   if (!/^[A-Za-z0-9._\/-]*$/.test(path) || path.split("/").includes("..")) {
     return send(res, 400, { detail: "invalid path", code: "invalid_path" });
   }
+  // the ride app may only reach the gateway's public API, not /admin or /metrics
+  if (target === "app" && !path.startsWith("v1/")) {
+    return send(res, 404, { detail: "not found", code: "invalid_path" });
+  }
   const query = new URLSearchParams(url.searchParams);
   query.delete("target");
   query.delete("path");
@@ -166,6 +173,11 @@ module.exports = async function handler(req, res) {
   const dest = `${upstream}/${path}${qs ? "?" + qs : ""}`;
 
   const init = { method: req.method, headers: {}, redirect: "manual" };
+  // Authorization carries the dashboard password, so the ride app's own JWT
+  // travels as X-App-Authorization and is restored for the gateway here
+  if (target === "app" && req.headers["x-app-authorization"]) {
+    init.headers.Authorization = req.headers["x-app-authorization"];
+  }
   if (req.method !== "GET" && req.method !== "HEAD" && req.body !== undefined) {
     init.body = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
     init.headers["Content-Type"] = req.headers["content-type"] || "application/json";

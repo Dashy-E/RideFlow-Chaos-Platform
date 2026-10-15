@@ -94,6 +94,11 @@ def list_runs():
     return [r.model_dump() for r in engine.list_runs()]
 
 
+@app.delete("/runs")
+def clear_runs():
+    return {"removed": engine.clear_runs()}
+
+
 @app.get("/runs/{run_id}")
 def get_run(run_id: str):
     run = engine.get_run(run_id)

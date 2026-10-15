@@ -7,8 +7,8 @@ socket. So the deployment is split:
 
 | Part | Where it runs |
 |---|---|
-| Mission Control dashboard (`frontend/dist`) | **Vercel** |
-| `/api/chaos/*`, `/api/security/*` proxy (`api/proxy.js`) | **Vercel** (serverless function) |
+| Mission Control dashboard (React app in `frontend/`, built by Vercel) | **Vercel** |
+| `/api/chaos/*`, `/api/security/*`, `/api/app/*` proxy (`api/proxy.js`, Node.js) | **Vercel** (serverless function) |
 | Everything else (`docker-compose.yml`) | A server you control, e.g. the free-tier EC2 box in `infra/free-tier-ec2/` |
 
 The browser only talks to Vercel over HTTPS; the proxy function forwards
@@ -31,8 +31,9 @@ Note the `public_ip` output.
 
 1. vercel.com → **Add New… → Project** → import this GitHub repo.
 2. Leave **Framework Preset** as *Other* and the root directory as `./`.
-   `vercel.json` already sets the output directory (`frontend/dist`), the
-   function, and the `/api/*` rewrites. There is no build step.
+   `vercel.json` already sets the install/build commands (`npm ci` +
+   `npm run build` in `frontend/`), the output directory (`frontend/dist`),
+   the function, the `/api/*` rewrites and the SPA fallback.
 3. Under **Environment Variables** add:
 
    | Name | Value |
@@ -72,9 +73,13 @@ that browser.
   Chaos experiments last minutes, far past a serverless function's timeout.
 - The Grafana/Prometheus links in the sidebar point straight at the backend
   (`http://<public_ip>:3001` / `:9090`).
-- The same `index.html` still works unchanged from the compose stack
-  (`http://localhost:5173`, or `http://<public_ip>:5173` on EC2): on port 5173
-  it calls the injectors directly instead of going through `/api`.
+- The same React build also runs in the compose stack's `dashboard`
+  container (`http://localhost:5173`, or `http://<public_ip>:5173` on EC2),
+  where nginx (`frontend/nginx.conf`) provides the same `/api/*` routes, so
+  no password or Backend box is needed there.
+- `/api/app/*` reaches only the gateway's public `/v1/*` API (the Ride App
+  page). The rider's JWT travels in `X-App-Authorization` because
+  `Authorization` carries the dashboard password.
 
 ## Security caveat
 

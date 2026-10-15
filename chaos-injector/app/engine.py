@@ -79,6 +79,14 @@ class ChaosEngine:
     def _save_runs(self):
         RUNS_FILE.write_text(json.dumps({k: v.model_dump() for k, v in self._runs.items()}))
 
+    def clear_runs(self) -> int:
+        """Forget finished runs (e.g. before a demo); an active run is kept."""
+        keep = {k: v for k, v in self._runs.items() if self._active_run is not None and k == self._active_run.runId}
+        removed = len(self._runs) - len(keep)
+        self._runs = keep
+        self._save_runs()
+        return removed
+
     def record_active_fault(self, run_id: str, experiment_id: str):
         ACTIVE_FAULT_FILE.write_text(json.dumps({"runId": run_id, "experimentId": experiment_id, "t0": time.time()}))
 

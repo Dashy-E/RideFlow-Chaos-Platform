@@ -148,6 +148,10 @@ services:
       RIDE_SERVICE_URL: http://ride-service:8082
       DRIVER_SERVICE_URL: http://driver-service:8083
       PRICING_SERVICE_URL: http://pricing-service:8084
+      # built-in traffic + driver fleet so experiments always have load to measure
+      SIMULATOR_AUTOSTART: "true"
+      SIMULATOR_RPS: "4"
+      SIMULATOR_DRIVERS: "30"
     volumes:
       - ./experiments:/app/experiments:ro
       - chaos-state:/tmp/chaos-state
@@ -273,18 +277,21 @@ services:
   # ---------------------------------------------------------------------
   # Dashboard (frontend static files, built separately)
   # ---------------------------------------------------------------------
+  # React dashboard: built in the image, served by nginx, which also proxies
+  # /api/* to the injectors and gateway (frontend/nginx.conf)
   dashboard:
-    image: nginx:alpine
+    build: ./frontend
+    image: rideflow/dashboard:dev
     container_name: dashboard
     restart: unless-stopped
     ports:
       - "5173:80"
-    volumes:
-      # bind mount so this works once the frontend team's build lands here;
-      # frontend/dist is built by `npm run build` in frontend/
-      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      - chaos-injector
+      - security-injector
+      - api-gateway
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
       interval: 10s
       timeout: 3s
       retries: 3
