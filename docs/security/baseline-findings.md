@@ -6,7 +6,7 @@ docker-compose stack. This is exactly the kind of evidence doc §3.2's note
 as you fix things, and it becomes a real before/after story for the report.
 
 | Attack | Verdict | Summary |
-|---|---|---|
+|----|----|----|
 | `rate-limit-pressure-gateway` | ✅ defended (after fix) | Gateway's per-IP token bucket throttled 89/240 requests in a burst. **Originally failed**: the rate limiter keyed on `r.RemoteAddr`, which includes the ephemeral source port and is different on every connection — every request got a fresh, full bucket. Fixed in `services/api-gateway/main.go` (`clientIP()` now strips the port via `net.SplitHostPort`). |
 | `injection-fuzz-ride-service` | ✅ defended | 8/8 SQLi/XSS/command-injection-style and oversized payloads handled without a 5xx or stack-trace disclosure. |
 | `jwt-tampering-user-service` | ⚠️ partial | `alg:none`, garbage signatures, and stale-signature payload tampering are all correctly rejected. **One real finding**: a token forged with the *hardcoded default* `JWT_SECRET` fallback in `services/user-service/src/index.js` is accepted. This is fine for local dev but is a **critical** finding if that default ever ships to a real deployment — `JWT_SECRET` must be overridden via a real secret (AWS Secrets Manager / K8s Secret + IRSA), never left at its source default. |
